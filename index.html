@@ -17,17 +17,19 @@
     button.stop { background: #b00020; }
     button:disabled { opacity: .45; }
     #status { margin-top: 1rem; font-variant-numeric: tabular-nums; white-space: pre-wrap; }
-    code { font-size: .8rem; }
   </style>
 </head>
 <body>
   <h1>IMU Recorder</h1>
-  <p>Records phone accel + gyro via the browser Sensor APIs. Tap Start, move the phone, then Stop &amp; download CSV.</p>
+  <p>
+    Logs DeviceMotion on iPhone. Accel is m/s² including gravity.
+    Gyro is °/s about device X/Y/Z (right / top / out-of-screen).
+  </p>
 
-  <label>Hz hint <input id="hz" type="number" min="1" max="100" value="50" style="width:4rem"></label>
+  <label>Max Hz <input id="hz" type="number" min="1" max="60" value="60" style="width:4rem"></label>
 
   <button id="start">Start</button>
-  <button id="stop" class="stop" disabled>Stop &amp; Download CSV</button>
+  <button id="stop" class="stop" disabled>Stop &amp; Share CSV</button>
 
   <div id="status">Idle</div>
 
@@ -41,58 +43,65 @@
     let rows = [];
     let samples = 0;
     let lastWrite = 0;
-    let latest = null;
 
     function csvEscape(v) {
       return v == null || Number.isNaN(v) ? "" : String(v);
-    }
-
-    async function ensurePermission() {
-      // iOS Safari requires this, and it must run from a tap.
-      if (typeof DeviceMotionEvent !== "undefined" &&
-          typeof DeviceMotionEvent.requestPermission === "function") {
-        const state = await DeviceMotionEvent.requestPermission();
-        if (state !== "granted") throw new Error("Motion permission denied");
-      }
-    }
-
-    function onMotion(e) {
-      if (!recording) return;
-      const a = e.accelerationIncludingGravity || {};
-      const u = e.acceleration || {};
-      const g = e.rotationRate || {};
-      latest = {
-        t: performance.now() / 1000,
-        ax: a.x, ay: a.y, az: a.z,
-        ux: u.x, uy: u.y, uz: u.z,
-        gx: g.alpha, gy: g.beta, gz: g.gamma,
-        interval: e.interval
-      };
-
-      const minDt = 1000 / Math.max(1, Number(hzInput.value) || 50);
-      const now = performance.now();
-      if (now - lastWrite < minDt) return;
-      lastWrite = now;
-
-      rows.push([
-        latest.t, latest.ax, latest.ay, latest.az,
-        latest.ux, latest.uy, latest.uz,
-        latest.gx, latest.gy, latest.gz, latest.interval
-      ].map(csvEscape).join(","));
-      samples++;
-
-      status.textContent =
-        `Recording\n` +
-        `samples: ${samples}\n` +
-        `accel g: ${fmt(latest.ax)}, ${fmt(latest.ay)}, ${fmt(latest.az)}\n` +
-        `gyro °/s: ${fmt(latest.gx)}, ${fmt(latest.gy)}, ${fmt(latest.gz)}`;
     }
 
     function fmt(n) {
       return n == null || Number.isNaN(n) ? "—" : Number(n).toFixed(3);
     }
 
+    async function ensurePermission() {
+      if (typeof DeviceMotionEvent === "undefined") {
+        throw new Error("DeviceMotion not available");
+      }
+      // iOS: only works on https:// or http://127.0.0.1, and must be from a tap
+      if (typeof DeviceMotionEvent.requestPermission === "function") {
+        const state = await DeviceMotionEvent.requestPermission();
+        if (state !== "granted") throw new Error("Motion permission denied: " + state);
+      } else if (!window.isSecureContext) {
+        throw new Error("Need https:// (or localhost). Plain http:// LAN IP will not get sensors.");
+      }
+    }
+
+    function onMotion(e) {
+      if (!recording) return;
+
+      // Including gravity — needed later for tilt / joint angle
+      const a = e.accelerationIncludingGravity || {};
+      // User accel (gravity removed) — optional, often null-ish on some browsers
+      const u = e.acceleration || {};
+      // W3C: alpha=about Z, beta=about X, gamma=about Y (°/s)
+      const r = e.rotationRate || {};
+
+      const ax = a.x, ay = a.y, az = a.z;
+      const ux = u.x, uy = u.y, uz = u.z;
+      // Store as device-frame gx,gy,gz (about X,Y,Z)
+      const gx = r.beta;   // about X
+      const gy = r.gamma;  // about Y
+      const gz = r.alpha;  // about Z
+
+      const minDt = 1000 / Math.max(1, Math.min(60, Number(hzInput.value) || 60));
+      const now = performance.now();
+      if (now - lastWrite < minDt) return;
+      lastWrite = now;
+
+      rows.push([
+        now / 1000, ax, ay, az, ux, uy, uz, gx, gy, gz, e.interval
+      ].map(csvEscape).join(","));
+      samples++;
+
+      status.textContent =
+        `Recording\n` +
+        `samples: ${samples}\n` +
+        `accel m/s² (w/ gravity): ${fmt(ax)}, ${fmt(ay)}, ${fmt(az)}\n` +
+        `gyro °/s (x,y,z): ${fmt(gx)}, ${fmt(gy)}, ${fmt(gz)}\n` +
+        `standing check: ay should be ~+9.8`;
+    }
+
     startBtn.onclick = async () => {
+      status.textContent = "Requesting permission…";
       try {
         await ensurePermission();
       } catch (err) {
@@ -100,49 +109,45 @@
         return;
       }
 
-      rows = ["t_s,ax,ay,az,ux,uy,uz,gx_alpha,gy_beta,gz_gamma,interval_ms"];
+      rows = ["t_s,ax,ay,az,ux,uy,uz,gx,gy,gz,interval_ms"];
       samples = 0;
       lastWrite = 0;
       recording = true;
       startBtn.disabled = true;
       stopBtn.disabled = false;
       window.addEventListener("devicemotion", onMotion);
-      status.textContent = "Recording…";
+      status.textContent = "Permission OK — recording…";
     };
 
     stopBtn.onclick = async () => {
-  recording = false;
-  window.removeEventListener("devicemotion", onMotion);
-  startBtn.disabled = false;
-  stopBtn.disabled = true;
+      recording = false;
+      window.removeEventListener("devicemotion", onMotion);
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
 
-  const blob = new Blob([rows.join("\n")], { type: "text/csv" });
-  const name = `imu_${Date.now()}.csv`;
-  const file = new File([blob], name, { type: "text/csv" });
+      const blob = new Blob([rows.join("\n")], { type: "text/csv" });
+      const name = `imu_${Date.now()}.csv`;
+      const file = new File([blob], name, { type: "text/csv" });
 
-  try {
-    if (navigator.canShare && navigator.canShare({ files: [file] })) {
-      await navigator.share({ files: [file], title: name });
-      status.textContent = `Shared ${samples} samples`;
-      return;
-    }
-  } catch (e) {
-    // user canceled share — ignore
-    if (e && e.name === "AbortError") {
-      status.textContent = `Canceled (${samples} samples)`;
-      return;
-    }
-  }
+      try {
+        if (navigator.canShare && navigator.canShare({ files: [file] })) {
+          await navigator.share({ files: [file], title: name });
+          status.textContent = `Shared ${samples} samples`;
+          return;
+        }
+      } catch (e) {
+        if (e && e.name === "AbortError") {
+          status.textContent = `Canceled (${samples} samples)`;
+          return;
+        }
+      }
 
-  // fallback: open CSV in a tab — then tap Share → Save to Files
-  const url = URL.createObjectURL(blob);
-  const opened = window.open(url, "_blank");
-  if (!opened) {
-    location.href = url; // last resort
-  }
-  status.textContent =
-    `Saved ${samples} samples.\nIf no share sheet: use Share → Save to Files`;
-};
+      const url = URL.createObjectURL(blob);
+      const opened = window.open(url, "_blank");
+      if (!opened) location.href = url;
+      status.textContent =
+        `Saved ${samples} samples.\nIf no share sheet: Share → Save to Files`;
+    };
   </script>
 </body>
 </html>
