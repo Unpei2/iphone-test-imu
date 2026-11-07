@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <title>IMU Recorder</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+    body { margin: 0; padding: 1.25rem; max-width: 28rem; }
+    h1 { font-size: 1.25rem; margin: 0 0 .5rem; }
+    p { color: #666; margin: 0 0 1rem; font-size: .9rem; }
+    button {
+      font: inherit; padding: .85rem 1.1rem; border-radius: .75rem;
+      border: 0; background: #111; color: #fff; width: 100%; margin: .35rem 0;
+    }
+    button.stop { background: #b00020; }
+    button:disabled { opacity: .45; }
+    #status { margin-top: 1rem; font-variant-numeric: tabular-nums; white-space: pre-wrap; }
+    code { font-size: .8rem; }
+  </style>
+</head>
+<body>
+  <h1>IMU Recorder</h1>
+  <p>Records phone accel + gyro via the browser Sensor APIs. Tap Start, move the phone, then Stop &amp; download CSV.</p>
+
+  <label>Hz hint <input id="hz" type="number" min="1" max="100" value="50" style="width:4rem"></label>
+
+  <button id="start">Start</button>
+  <button id="stop" class="stop" disabled>Stop &amp; Download CSV</button>
+
+  <div id="status">Idle</div>
+
+  <script>
+    const startBtn = document.getElementById("start");
+    const stopBtn = document.getElementById("stop");
+    const status = document.getElementById("status");
+    const hzInput = document.getElementById("hz");
+
+    let recording = false;
+    let rows = [];
+    let samples = 0;
+    let lastWrite = 0;
+    let latest = null;
+
+    function csvEscape(v) {
+      return v == null || Number.isNaN(v) ? "" : String(v);
+    }
+
+    async function ensurePermission() {
+      // iOS Safari requires this, and it must run from a tap.
+      if (typeof DeviceMotionEvent !== "undefined" &&
+          typeof DeviceMotionEvent.requestPermission === "function") {
+        const state = await DeviceMotionEvent.requestPermission();
+        if (state !== "granted") throw new Error("Motion permission denied");
+      }
+    }
+
+    function onMotion(e) {
+      if (!recording) return;
+      const a = e.accelerationIncludingGravity || {};
+      const u = e.acceleration || {};
+      const g = e.rotationRate || {};
+      latest = {
+        t: performance.now() / 1000,
+        ax: a.x, ay: a.y, az: a.z,
+        ux: u.x, uy: u.y, uz: u.z,
+        gx: g.alpha, gy: g.beta, gz: g.gamma,
+        interval: e.interval
+      };
+
+      const minDt = 1000 / Math.max(1, Number(hzInput.value) || 50);
+      const now = performance.now();
+      if (now - lastWrite < minDt) return;
+      lastWrite = now;
+
+      rows.push([
+        latest.t, latest.ax, latest.ay, latest.az,
+        latest.ux, latest.uy, latest.uz,
+        latest.gx, latest.gy, latest.gz, latest.interval
+      ].map(csvEscape).join(","));
+      samples++;
+
+      status.textContent =
+        `Recording\n` +
+        `samples: ${samples}\n` +
+        `accel g: ${fmt(latest.ax)}, ${fmt(latest.ay)}, ${fmt(latest.az)}\n` +
+        `gyro °/s: ${fmt(latest.gx)}, ${fmt(latest.gy)}, ${fmt(latest.gz)}`;
+    }
+
+    function fmt(n) {
+      return n == null || Number.isNaN(n) ? "—" : Number(n).toFixed(3);
+    }
+
+    startBtn.onclick = async () => {
+      try {
+        await ensurePermission();
+      } catch (err) {
+        status.textContent = String(err.message || err);
+        return;
+      }
+
+      rows = ["t_s,ax,ay,az,ux,uy,uz,gx_alpha,gy_beta,gz_gamma,interval_ms"];
+      samples = 0;
+      lastWrite = 0;
+      recording = true;
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      window.addEventListener("devicemotion", onMotion);
+      status.textContent = "Recording…";
+    };
+
+    stopBtn.onclick = async () => {
+  recording = false;
+  window.removeEventListener("devicemotion", onMotion);
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
+
+  const blob = new Blob([rows.join("\n")], { type: "text/csv" });
+  const name = `imu_${Date.now()}.csv`;
+  const file = new File([blob], name, { type: "text/csv" });
+
+  try {
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file], title: name });
+      status.textContent = `Shared ${samples} samples`;
+      return;
+    }
+  } catch (e) {
+    // user canceled share — ignore
+    if (e && e.name === "AbortError") {
+      status.textContent = `Canceled (${samples} samples)`;
+      return;
+    }
+  }
+
+  // fallback: open CSV in a tab — then tap Share → Save to Files
+  const url = URL.createObjectURL(blob);
+  const opened = window.open(url, "_blank");
+  if (!opened) {
+    location.href = url; // last resort
+  }
+  status.textContent =
+    `Saved ${samples} samples.\nIf no share sheet: use Share → Save to Files`;
+};
+  </script>
+</body>
+</html>
